@@ -33,5 +33,6 @@ Connecteurs > Ajouter un connecteur personnalisé :
 
 - La clé Garmin expire (30 jours à 1 an selon ton choix) : la régénérer puis `docker compose up -d`.
 - Le jeton d'accès Garmin (24 h) est renouvelé automatiquement, en mémoire.
+- `garmin_sleep` et `garmin_daily_summaries` renvoient une ligne courte par nuit ou par jour ; `detail=true` donne la réponse Garmin complète.
 - Les longues listes sont tronquées à `MAX_LIST_ITEMS` (40) ; `garmin_get` accepte `full=true`.
 - Chemins d'API repris du client officiel github.com/garmin/connect-personal-api-python.
