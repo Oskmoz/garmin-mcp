@@ -113,6 +113,83 @@ def compact(value: Any, max_items: int) -> Any:
     return value
 
 
+def _local_hhmm(ms: Any) -> str | None:
+    """Garmin fournit des horodatages « locaux » en millisecondes : on n'en garde que HH:MM."""
+    if not isinstance(ms, (int, float)):
+        return None
+    return time.strftime("%H:%M", time.gmtime(ms / 1000))
+
+
+def _minutes(seconds: Any) -> int | None:
+    return round(seconds / 60) if isinstance(seconds, (int, float)) else None
+
+
+def slim_sleep(data: Any) -> Any:
+    """Une ligne courte par nuit au lieu de la réponse Garmin complète."""
+    if not isinstance(data, list):
+        return data
+    nights = []
+    for n in data:
+        if not isinstance(n, dict):
+            continue
+        overall = (n.get("sleepScores") or {}).get("overall") or {}
+        nights.append(
+            {
+                "date": n.get("calendarDate"),
+                "sommeil_min": _minutes(n.get("sleepTimeSeconds")),
+                "profond_min": _minutes(n.get("deepSleepSeconds")),
+                "leger_min": _minutes(n.get("lightSleepSeconds")),
+                "paradoxal_min": _minutes(n.get("remSleepSeconds")),
+                "eveil_min": _minutes(n.get("awakeSleepSeconds")),
+                "coucher": _local_hhmm(n.get("sleepStartTimestampLocal")),
+                "lever": _local_hhmm(n.get("sleepEndTimestampLocal")),
+                "score": overall.get("value"),
+                "qualite": overall.get("qualifierKey"),
+                "fc_moy": n.get("avgHeartRate"),
+                "stress_moy": n.get("avgSleepStress"),
+                "reveils": n.get("awakeCount"),
+            }
+        )
+    return nights
+
+
+def slim_daily(data: Any) -> Any:
+    """Une ligne courte par jour au lieu de la réponse Garmin complète."""
+    rows = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return data
+    days = []
+    for d in rows:
+        if not isinstance(d, dict):
+            continue
+        steps = (d.get("movement") or {}).get("steps") or {}
+        kcal = d.get("calories") or {}
+        hr = d.get("heartRate") or {}
+        minutes = d.get("intensityMinutes") or {}
+        battery = d.get("bodyBattery") or {}
+        duration = (d.get("wellnessChronology") or {}).get("totalDurationInMillis")
+        days.append(
+            {
+                "date": d.get("calendarDate"),
+                "journee_partielle": isinstance(duration, (int, float)) and duration < 86_400_000,
+                "pas": steps.get("value"),
+                "objectif_pas": steps.get("goal"),
+                "distance_m": steps.get("distanceInMeters"),
+                "kcal_actives": kcal.get("burnedActive"),
+                "kcal_totales": kcal.get("burnedTotal"),
+                "fc_repos": hr.get("restingValue"),
+                "fc_min": hr.get("minValue"),
+                "fc_max": hr.get("maxValue"),
+                "intensite_moderee_min": minutes.get("moderate"),
+                "intensite_soutenue_min": minutes.get("vigorous"),
+                "stress_moy": (d.get("stress") or {}).get("avgLevel"),
+                "body_battery_min": battery.get("minValue"),
+                "body_battery_max": battery.get("maxValue"),
+            }
+        )
+    return days
+
+
 def _dates(start_date: str | None, end_date: str | None, default_days: int) -> tuple[str, str]:
     end = date.fromisoformat(end_date) if end_date else date.today()
     start = date.fromisoformat(start_date) if start_date else end - timedelta(days=default_days - 1)
@@ -129,7 +206,12 @@ def _dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-async def _call(path: str, params: dict[str, Any] | None = None, full: bool = False) -> str:
+async def _call(
+    path: str,
+    params: dict[str, Any] | None = None,
+    full: bool = False,
+    slim: Any = None,
+) -> str:
     try:
         data = await garmin.get(path, params)
     except GarminError as exc:
@@ -138,7 +220,11 @@ async def _call(path: str, params: dict[str, Any] | None = None, full: bool = Fa
         return _dump({"erreur": f"Appel Garmin impossible : {exc}"})
     if data is None:
         return _dump({"resultat": "aucune donnée"})
-    return _dump(data if full else compact(data, MAX_LIST_ITEMS))
+    if full:
+        return _dump(data)
+    if slim is not None:
+        data = slim(data)
+    return _dump(compact(data, MAX_LIST_ITEMS))
 
 
 # ------------------------------------------------------------------------------ MCP
@@ -179,22 +265,30 @@ async def garmin_activity(activity_id: int) -> str:
 
 
 @mcp.tool(structured_output=False, annotations=ToolAnnotations(title="Sommeil", **READ_ONLY))
-async def garmin_sleep(start_date: str | None = None, end_date: str | None = None) -> str:
-    """Résumés de sommeil par nuit (durée, phases, score). Défaut : 7 derniers jours."""
+async def garmin_sleep(
+    start_date: str | None = None, end_date: str | None = None, detail: bool = False
+) -> str:
+    """Sommeil par nuit (durées en minutes, phases, score, coucher et lever). Défaut : 7 derniers
+    jours. `detail=true` renvoie la réponse Garmin complète (volumineuse)."""
     start, end = _dates(start_date, end_date, 7)
     return await _call(
-        "/sleep-service/sleep/dailySleepSummariesByDate", {"startDate": start, "endDate": end}
+        "/sleep-service/sleep/dailySleepSummariesByDate",
+        {"startDate": start, "endDate": end},
+        slim=None if detail else slim_sleep,
     )
 
 
 @mcp.tool(structured_output=False, annotations=ToolAnnotations(title="Résumés quotidiens", **READ_ONLY))
 async def garmin_daily_summaries(
-    start_date: str | None = None, end_date: str | None = None
+    start_date: str | None = None, end_date: str | None = None, detail: bool = False
 ) -> str:
-    """Résumé par jour : pas, calories, FC de repos, stress, minutes d'intensité. Défaut : 7 jours."""
+    """Résumé par jour : pas, calories, FC de repos, stress, minutes d'intensité, Body Battery.
+    Défaut : 7 jours. `detail=true` renvoie la réponse Garmin complète (volumineuse)."""
     start, end = _dates(start_date, end_date, 7)
     return await _call(
-        "/usersummary-service/v2/dailysummaries", {"startDate": start, "endDate": end}
+        "/usersummary-service/v2/dailysummaries",
+        {"startDate": start, "endDate": end},
+        slim=None if detail else slim_daily,
     )
 
 
